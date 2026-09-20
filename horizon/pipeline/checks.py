@@ -12,8 +12,15 @@ data.
 # into strings it then refuses.
 from dagster import AssetCheckResult, AssetCheckSeverity, AssetIn, asset_check
 
-from .assets import BlameCapture, blame_capture, blame_records
+from .assets import (
+    BlameCapture,
+    LoadResult,
+    blame_attribution_table,
+    blame_capture,
+    blame_records,
+)
 from .blame_parser import BlameRecord
+from .resources import PostgresResource
 
 
 @asset_check(
@@ -163,4 +170,103 @@ def records_parse_completely(
             "files_captured": expected,
             "files_parsed": len(parsed_paths),
         },
+    )
+
+
+@asset_check(
+    asset=blame_attribution_table,
+    additional_ins={"blame_records": AssetIn("blame_records")},
+    description="Line counts in Postgres add up to the number of lines that were parsed.",
+)
+def attribution_lines_reconcile(
+    blame_attribution_table: LoadResult,
+    blame_records: list[BlameRecord],
+    postgres: PostgresResource,
+) -> AssetCheckResult:
+    """Counts the rows back out of the database rather than trusting the writer.
+
+    Legacy reported `blame_status: complete` from a variable the writer set
+    itself. Asking Postgres what it actually holds is the difference between
+    checking the work and reading back the intention.
+    """
+
+    with postgres.connect() as connection:
+        stored = connection.execute(
+            """
+            SELECT COALESCE(SUM(lines), 0)
+            FROM horizon.blame_attribution
+            WHERE run_id = %s AND organization = %s AND repository = %s
+            """,
+            (
+                blame_attribution_table.run_id,
+                blame_attribution_table.organization,
+                blame_attribution_table.repository,
+            ),
+        ).fetchone()[0]
+
+    parsed = len(blame_records)
+    passed = stored == parsed
+
+    return AssetCheckResult(
+        passed=passed,
+        severity=AssetCheckSeverity.ERROR,
+        description=(
+            f"{stored} lines stored, {parsed} parsed."
+            if passed
+            else f"{stored} lines stored but {parsed} parsed -- {abs(parsed - stored)} unaccounted for."
+        ),
+        metadata={
+            "lines_stored": int(stored),
+            "lines_parsed": parsed,
+            "difference": parsed - int(stored),
+        },
+    )
+
+
+@asset_check(
+    asset=blame_attribution_table,
+    description="Every attribution row points at a commit row that exists.",
+)
+def every_attribution_has_a_commit(
+    blame_attribution_table: LoadResult,
+    postgres: PostgresResource,
+) -> AssetCheckResult:
+    """The foreign key should make this impossible, which is the point.
+
+    It runs anyway: a constraint that was never created, or dropped by a hand-run
+    migration, fails silently and the orphans only show up as members whose lines
+    have no author.
+    """
+
+    with postgres.connect() as connection:
+        orphans = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM horizon.blame_attribution AS attribution
+            LEFT JOIN horizon.blame_commits AS commits
+              ON  commits.run_id       = attribution.run_id
+              AND commits.organization = attribution.organization
+              AND commits.repository   = attribution.repository
+              AND commits.commit_sha   = attribution.commit_sha
+            WHERE attribution.run_id = %s
+              AND attribution.organization = %s
+              AND attribution.repository = %s
+              AND commits.commit_sha IS NULL
+            """,
+            (
+                blame_attribution_table.run_id,
+                blame_attribution_table.organization,
+                blame_attribution_table.repository,
+            ),
+        ).fetchone()[0]
+
+    return AssetCheckResult(
+        passed=orphans == 0,
+        severity=AssetCheckSeverity.ERROR,
+        description=(
+            "every attribution row resolves to a commit."
+            if not orphans
+            else f"{orphans} attribution row(s) reference a commit that is not stored."
+        ),
+        metadata={"orphan_rows": int(orphans)},
     )

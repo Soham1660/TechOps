@@ -11,7 +11,15 @@ got wrong is reachable from a test with a string and no repository.
 # into strings it then refuses.
 from dataclasses import fields as dataclass_fields
 
-from dagster import AssetExecutionContext, Failure, MetadataValue, TableRecord, asset
+from dagster import (
+    AssetExecutionContext,
+    Failure,
+    MetadataValue,
+    TableColumn,
+    TableRecord,
+    TableSchema,
+    asset,
+)
 
 from ..blame_parser import BlameRecord, parse_blame_capture
 from ..metadata import table_schema_from
@@ -56,7 +64,84 @@ _COLUMN_NOTES: dict[str, tuple[str, str]] = {
     ),
 }
 
+# The table schema is the machine-readable contract, but it is not the most
+# discoverable view in Dagster's asset page. Keep an explicit field catalogue
+# beside it so the page also shows exactly what the parser pulled and where
+# each value came from.
+_FIELD_SOURCES = {
+    "organization": "capture section header",
+    "repository": "capture section header",
+    "blamed_file_path": "capture section header",
+    "line_number_in_file": "blame header final-line number",
+    "commit_sha": "blame header SHA",
+    "commit_summary": "git summary",
+    "consecutive_line_count": "blame header group count",
+    "line_number_at_origin": "blame header original-line number",
+    "author_name": "git author",
+    "author_email": "git author-mail",
+    "authored_at_epoch": "git author-time",
+    "author_utc_offset": "git author-tz",
+    "committer_name": "git committer",
+    "committer_email": "git committer-mail",
+    "committed_at_epoch": "git committer-time",
+    "committer_utc_offset": "git committer-tz",
+    "origin_file_path": "git filename",
+    "previous_commit_sha": "git previous SHA",
+    "previous_file_path": "git previous path",
+    "reaches_history_boundary": "git boundary marker",
+}
+
+_PARSED_ATTRIBUTES = [
+    {
+        "name": field.name,
+        "type": _COLUMN_NOTES[field.name][0],
+        "source": _FIELD_SOURCES[field.name],
+        "description": _COLUMN_NOTES[field.name][1],
+    }
+    for field in dataclass_fields(BlameRecord)
+]
+
+if set(_FIELD_SOURCES) != set(_COLUMN_NOTES):
+    raise RuntimeError("every parsed field must have a source and column note")
+
 BLAME_RECORD_SCHEMA = table_schema_from(BlameRecord, _COLUMN_NOTES)
+
+_ATTRIBUTE_PREVIEW_SCHEMA = TableSchema(
+    columns=[
+        TableColumn(
+            name="attribute",
+            type="string",
+            description="Name of the field emitted by the blame parser.",
+        ),
+        TableColumn(
+            name="type",
+            type="string",
+            description="Dagster display type for the parsed field.",
+        ),
+        TableColumn(
+            name="source",
+            type="string",
+            description="The porcelain field or capture context the value came from.",
+        ),
+        TableColumn(
+            name="description",
+            type="string",
+            description="What the parsed field means.",
+        ),
+    ]
+)
+
+_ATTRIBUTE_PREVIEW = [
+    TableRecord(
+        {
+            "attribute": attribute["name"],
+            "type": attribute["type"],
+            "source": attribute["source"],
+            "description": attribute["description"],
+        }
+    )
+    for attribute in _PARSED_ATTRIBUTES
+]
 
 # Sample rows shown next to the schema. Small on purpose: this is a legend for
 # the columns, not a data browser.
@@ -69,12 +154,18 @@ _SAMPLE_ROWS = 5
     description=(
         "One record per blamed line, carrying every field git emitted about it. "
         "Pure parsing: the logic lives in pipeline.blame_parser and touches no "
-        "network, disk or database."
+        "network, disk or database. See `parsed_attributes` for the complete "
+        "field list and each field's source."
     ),
     metadata={
         # Declared here rather than only at run time so the columns are readable
         # in the UI before anything has been materialized.
         "dagster/column_schema": BLAME_RECORD_SCHEMA,
+        "attribute_preview": MetadataValue.table(
+            records=_ATTRIBUTE_PREVIEW,
+            schema=_ATTRIBUTE_PREVIEW_SCHEMA,
+        ),
+        "parsed_attributes": MetadataValue.json(_PARSED_ATTRIBUTES),
         "grain": "one row per blamed line",
         "parser": "pipeline/blame_parser.py",
     },
@@ -126,6 +217,7 @@ def blame_records(
                 ],
                 schema=BLAME_RECORD_SCHEMA,
             ),
+            "parsed_attributes": MetadataValue.json(_PARSED_ATTRIBUTES),
         }
     )
     return records

@@ -22,9 +22,11 @@ from pathlib import Path
 from uuid import uuid4
 
 import httpx
+import psycopg
 from dagster import ConfigurableResource
 
 from .config import PipelineConfigError, PipelineSettings, get_pipeline_settings
+from .storage import SQLiteResource
 
 # The blame invocation, in one place because two things depend on it agreeing:
 # the flags git is run with, and the header line written above each captured
@@ -325,11 +327,40 @@ class PostgresResource(ConfigurableResource):
     A new schema in the existing database: the legacy ``gitea_analytics`` tables
     stay untouched as the correctness baseline the new numbers are read against.
 
-    Configuration surface only until PR 4, which is the first PR that writes.
+    The schema name is not configurable, because ``schema.sql`` writes it into
+    every statement. A setting that half the code ignores is worse than no
+    setting.
     """
 
     database_url: str | None = None
-    schema_name: str = "horizon"
+
+    @contextmanager
+    def connect(self) -> Iterator["psycopg.Connection"]:
+        """One transaction. It commits on a clean exit and rolls back otherwise.
+
+        A load that fails halfway must leave no rows behind: a partial run that
+        looks like a complete one is the failure mode this whole pipeline is a
+        reaction to.
+        """
+
+        with psycopg.connect(self._require_database_url()) as connection:
+            yield connection
+
+    def ensure_schema(self) -> None:
+        """Apply ``schema.sql``. Every statement is IF NOT EXISTS, so it is safe
+        to run before each load and removes the "did you migrate?" question."""
+
+        statements = (Path(__file__).parent / "schema.sql").read_text()
+        with self.connect() as connection:
+            connection.execute(statements)
+
+    def _require_database_url(self) -> str:
+        if not (self.database_url or "").strip():
+            raise PipelineConfigError(
+                "HORIZON_DATABASE_URL is not set. Export it, or add it to "
+                "horizon/.env, before materializing the load assets."
+            )
+        return self.database_url.strip()
 
 
 def _path_safe(value: str) -> str:
@@ -356,4 +387,5 @@ def build_resources(
         ),
         "workspace": GitWorkspace(),
         "postgres": PostgresResource(database_url=resolved.database_url),
+        "sqlite": SQLiteResource(database_path=resolved.sqlite_path),
     }
