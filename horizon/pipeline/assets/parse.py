@@ -1,4 +1,4 @@
-"""L3 parse: raw blame text into records. Pure, apart from reading the capture.
+"""Blame parsing: raw blame text into records. Pure, apart from reading capture.
 
 The parsing itself lives in ``pipeline.blame_parser`` and touches nothing. This
 asset is only the shell around it: read the file the capture layer wrote, hand
@@ -149,7 +149,7 @@ _SAMPLE_ROWS = 5
 
 
 @asset(
-    group_name="l3_parse",
+    group_name="03_parse",
     kinds={"python"},
     description=(
         "One record per blamed line, carrying every field git emitted about it. "
@@ -174,6 +174,23 @@ def blame_records(
     context: AssetExecutionContext,
     blame_capture: BlameCapture,
 ) -> list[BlameRecord]:
+    if blame_capture.files_failed:
+        failed_paths = ", ".join(blame_capture.failed_paths) or "see capture metadata"
+        raise Failure(
+            description=(
+                f"Blame capture for {blame_capture.slug} is incomplete: "
+                f"{blame_capture.files_failed} of {blame_capture.files_tracked} tracked "
+                f"files failed. First failed paths: {failed_paths}."
+            )
+        )
+    if not blame_capture.captured_paths:
+        raise Failure(
+            description=(
+                f"Blame capture for {blame_capture.slug} contained no non-empty text files "
+                f"({blame_capture.files_tracked} tracked, "
+                f"{blame_capture.files_skipped_binary} binary, {blame_capture.files_empty} empty)."
+            )
+        )
     if not blame_capture.path.exists():
         # The capture is a file on disk rather than a value in the IO manager, so
         # it can outlive the run that made it -- or be swept up with the temp
@@ -188,6 +205,13 @@ def blame_records(
 
     text = blame_capture.path.read_text(encoding="utf-8", errors="replace")
     records = parse_blame_capture(text)
+    if not records:
+        raise Failure(
+            description=(
+                f"The capture for {blame_capture.slug} listed "
+                f"{len(blame_capture.captured_paths)} files but parsed zero blamed lines."
+            )
+        )
 
     blamed_paths = {record.blamed_file_path for record in records}
     origin_paths = {record.origin_file_path for record in records}
