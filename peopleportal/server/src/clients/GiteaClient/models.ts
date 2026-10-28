@@ -155,43 +155,49 @@ export interface GiteaRepository extends GiteaRepositoryBrief {
     licenses: string[];
 }
 
+/*
+ * Webhook bodies. Gitea adds fields to these payloads in most releases (1.27
+ * added branch_count, has_code and more to `repository`), and tsoa runs with
+ * noImplicitAdditionalProperties "throw-on-extras", so a full model turns every
+ * delivery into a 400 after an upgrade. Declare only what the handlers read and
+ * accept the rest: the handlers re-fetch the repository from the API before
+ * acting on it, so nothing else in the body is trusted anyway.
+ */
+export interface GiteaHookUser {
+    id: number;
+    username: string;
+    [key: string]: unknown;
+}
+
+export interface GiteaHookRepository {
+    id: number;
+    name: string;
+    full_name: string;
+    owner: GiteaHookUser;
+    [key: string]: unknown;
+}
+
 export interface GiteaHookRepositoryTrigger {
     action: string;
-    repository: GiteaRepository;
-    organization: GiteaUser;
-    sender: GiteaUser;
-}
-
-export interface GiteaCommitUser {
-    name: string;
-    email: string;
-    username: string;
-}
-
-export interface GiteaCommit {
-    id: string;
-    message: string;
-    url: string;
-    author: GiteaCommitUser;
-    committer: GiteaCommitUser;
-    verification: any;
-    timestamp: string;
-    added: string[];
-    removed: string[];
-    modified: string[];
+    repository: GiteaHookRepository;
+    organization: GiteaHookUser;
+    sender: GiteaHookUser;
+    [key: string]: unknown;
 }
 
 export interface GiteaHookCommitTrigger {
     ref: string;
     before: string;
     after: string;
-    compare_url: string;
-    commits: GiteaCommit[];
-    total_commits: number;
-    head_commit: GiteaCommit;
-    repository: GiteaRepository;
-    pusher: GiteaUser;
-    sender: GiteaUser;
+    repository: GiteaHookRepository;
+    [key: string]: unknown;
+}
+
+/* What repository provisioning needs: the API's copy of the repository and the
+   creator to remove as a collaborator. */
+export interface GiteaRepoProvisioningRequest {
+    repository: GiteaRepositoryBrief;
+    sender: { username: string };
 }
 
 export interface GiteaBranchProtection {

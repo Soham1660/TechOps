@@ -126,8 +126,8 @@ export class HooksController extends Controller {
             }
 
             await this.giteaClient.handleRepoProvisioning({
-                ...repoEvent,
                 repository,
+                sender: repoEvent.sender,
             });
         } catch (e: any) {
             /* Processing failed; leave the repository untouched for an authorized operator to review. */

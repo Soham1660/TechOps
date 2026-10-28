@@ -23,7 +23,7 @@ import {
     GiteaAPITeamDefinition,
     GiteaAPIUserDefinition,
     GiteaBranchProtection,
-    GiteaHookRepositoryTrigger,
+    GiteaRepoProvisioningRequest,
     GiteaRepository,
     GiteaRepositoryBrief,
 } from "./models";
@@ -320,9 +320,11 @@ export class GiteaClient implements SharedResourceClient {
      * If requests fail, we throw the errors as-is without catching. The callee is
      * expected to delete the newly created repository considering standards mismatch.
      *
-     * @param repoEvent Gitea Repository Event
+     * @param repoEvent The repository (as fetched from the API) and its creator
      */
-    public async handleRepoProvisioning(repoEvent: GiteaHookRepositoryTrigger) {
+    public async handleRepoProvisioning(
+        repoEvent: GiteaRepoProvisioningRequest,
+    ) {
         /* 1. Remove the creator from the collaborators list so team permissions take over */
         var DeleteCollabRequestConfig: any = {
             ...this.GiteaBaseConfig,
