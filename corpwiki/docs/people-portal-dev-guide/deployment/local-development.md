@@ -311,7 +311,7 @@ networks:
 
 services:
   server:
-    image: gitea/gitea:1.21.0
+    image: docker.gitea.com/gitea:1.27.3
     container_name: gitea
     environment:
       - USER_UID=1000
