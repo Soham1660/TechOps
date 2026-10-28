@@ -104,6 +104,9 @@ function withFakeClients(apiRepository, run) {
   giteaModule.GiteaClient = class {
     static GIT_REF_MAINBRANCH = RealGiteaClient.GIT_REF_MAINBRANCH;
     static GIT_NULL_COMMITID = RealGiteaClient.GIT_NULL_COMMITID;
+    async isOrganization() {
+      return true;
+    }
     async getRepository() {
       return apiRepository;
     }
