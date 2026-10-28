@@ -17,36 +17,80 @@ if ! awk -v user="$GITEA_ADMIN_USER" '$2 == user { found=1 } END { exit !found }
     --admin --must-change-password=false >&2
 fi
 
+# Tokens never go on a command line, where any local process could read them:
+# curl takes them from a --config on stdin, the Python helper from its env.
 token_valid=false
 if [[ -s .gitea-token ]]; then
   token=$(<.gitea-token)
-  if curl --fail --silent --max-time 10 -H "Authorization: token $token" "$url/api/v1/user" >/dev/null; then
+  if printf 'header = "Authorization: token %s"\n' "$token" |
+    curl --fail --silent --max-time 10 --config - "$url/api/v1/user" >/dev/null; then
     token_valid=true
   fi
 fi
-if [[ $token_valid == false ]]; then
-  # Run JSON parsing inside authentik's image. HTTP failures must abort rather
-  # than masquerade as "already exists". Only delete this stack's named token.
-  token_id=$(compose exec -T authentik-worker python - "$GITEA_ADMIN_USER" "$GITEA_ADMIN_PASSWORD" <<'PY'
-import base64, json, sys, urllib.request
-user, password = sys.argv[1:]
+new_token() {
+  local raw
+  raw=$(gitea_admin user generate-access-token --username "$GITEA_ADMIN_USER" \
+    --token-name "$1" --scopes all --raw)
+  raw=$(awk '/^[0-9a-fA-F]+$/ && length($0) == 40 {print}' <<<"$raw")
+  [[ $raw =~ ^[0-9a-fA-F]{40}$ ]] || die "Gitea did not return a single raw token."
+  printf '%s\n' "$raw"
+}
+
+# Prints the ids of the admin's tokens named $2, or starting with $3 if given,
+# except one named $4, authenticating with token $1. Gitea's token API needs
+# HTTP Basic, and ENABLE_BASIC_AUTHENTICATION=false refuses passwords there, so
+# the credential is a token sent as the password. JSON is parsed inside
+# authentik's image; HTTP failures must abort rather than read as "none".
+token_ids() {
+  GITEA_BASIC_SECRET=$1 compose exec -T -e GITEA_BASIC_SECRET authentik-worker \
+    python - "$GITEA_ADMIN_USER" "$2" "${3:-}" "${4:-}" <<'PY'
+import base64, json, os, sys, urllib.request
+user, name, prefix, skip = sys.argv[1:]
+secret = os.environ['GITEA_BASIC_SECRET']
 request = urllib.request.Request(f'http://gitea:3000/api/v1/users/{user}/tokens')
-request.add_header('Authorization', 'Basic ' + base64.b64encode(f'{user}:{password}'.encode()).decode())
+request.add_header('Authorization', 'Basic ' + base64.b64encode(f'{user}:{secret}'.encode()).decode())
 with urllib.request.urlopen(request, timeout=10) as response:
     tokens = json.load(response)
-print(next((t['id'] for t in tokens if t['name'] == 'people-portal-dev'), ''))
+for t in tokens:
+    if t['name'] != skip and (t['name'] == name or (prefix and t['name'].startswith(prefix))):
+        print(t['id'])
 PY
-)
-  if [[ -n $token_id ]]; then
-    curl --fail --silent --show-error --max-time 10 --request DELETE \
-      --user "$GITEA_ADMIN_USER:$GITEA_ADMIN_PASSWORD" \
-      "$url/api/v1/users/$GITEA_ADMIN_USER/tokens/$token_id" >/dev/null
-  fi
-  token=$(gitea_admin user generate-access-token --username "$GITEA_ADMIN_USER" \
-    --token-name people-portal-dev --scopes all --raw)
-  token=$(awk '/^[0-9a-fA-F]+$/ && length($0) == 40 {print}' <<<"$token")
-  [[ $token =~ ^[0-9a-fA-F]{40}$ ]] || die "Gitea did not return a single raw token."
+}
+
+# Deletes the admin's token $2 (an id or a name), authenticating with token $1.
+delete_token() {
+  printf 'user = "%s:%s"\n' "$GITEA_ADMIN_USER" "$1" |
+    curl --fail --silent --show-error --max-time 10 --config - --request DELETE \
+      "$url/api/v1/users/$GITEA_ADMIN_USER/tokens/$2" >/dev/null
+}
+
+# If recovery stops partway, the short-lived token revokes itself on exit so a
+# failed run doesn't leave an extra admin token behind. By name, so this needs
+# only curl and Gitea, not the lookup that may be what failed.
+revoke_rotate() {
+  [[ -n ${rotate:-} ]] || return 0
+  delete_token "$rotate" "$rotate_name" ||
+    echo "WARNING: could not revoke Gitea token $rotate_name; delete it in $GITEA_ADMIN_USER's Applications settings." >&2
+}
+
+if [[ $token_valid == false ]]; then
+  # The CLI can mint tokens but not list or delete them. A short-lived token
+  # clears the stale people-portal-dev one, and any rotation tokens an earlier
+  # failed run left, so the name can be reused. The replacement is saved before
+  # it deletes the short-lived token. Only this stack's names are touched.
+  rotate_name="people-portal-dev-rotate-$(openssl rand -hex 4)"
+  rotate=$(new_token "$rotate_name")
+  trap revoke_rotate EXIT
+  # Assign first: set -e ignores a failed substitution in a for list.
+  stale_ids=$(token_ids "$rotate" people-portal-dev people-portal-dev-rotate- "$rotate_name")
+  for id in $stale_ids; do
+    delete_token "$rotate" "$id"
+  done
+  token=$(new_token people-portal-dev)
   private_file "$STACK_DIR/.gitea-token" <<<"$token"
+  delete_token "$token" "$rotate_name"
+  rotate=""
+  trap - EXIT
 fi
 chmod 600 .gitea-token
 
