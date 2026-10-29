@@ -6,12 +6,14 @@
  */
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const pino = require("pino");
 const { EventEmitter } = require("node:events");
 const {
   resolveLogLevel,
   serializeError,
   errorMap,
   requestLogger,
+  REDACT,
 } = require("../../dist/utils/logger.js");
 
 test("LOG_LEVEL is honoured, case-insensitively, and bad values fall back", () => {
@@ -63,4 +65,12 @@ test("a request gets an id header, and the id is passed along", () => {
 
   /* Finishing must not throw even with no session user. */
   res.emit("finish");
+});
+
+test("credentials are redacted at the top level and one level down", () => {
+  let line = "";
+  const log = pino({ redact: REDACT }, { write: (chunk) => (line += chunk) });
+  log.info({ password: "hunter2", token: "t0p", user: { secret: "s3", refreshToken: "r3" } });
+  assert.doesNotMatch(line, /hunter2|t0p|s3|r3/);
+  assert.match(line, /\[redacted\]/);
 });

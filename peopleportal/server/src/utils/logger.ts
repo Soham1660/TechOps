@@ -79,6 +79,25 @@ export function serializeError(err: unknown): unknown {
     return base;
 }
 
+/* Each key is covered at the top level and one level down: pino's "*.x" only
+   matches nested keys, so a bare { password } would otherwise slip through. */
+const SENSITIVE_KEYS = [
+    "token",
+    "accessToken",
+    "refreshToken",
+    "secret",
+    "password",
+];
+export const REDACT = {
+    paths: [
+        "req.headers.authorization",
+        "req.headers.cookie",
+        ...SENSITIVE_KEYS,
+        ...SENSITIVE_KEYS.map((key) => `*.${key}`),
+    ],
+    censor: "[redacted]",
+};
+
 const level = resolveLogLevel();
 
 /** The request currently being served, so any log line can be tied back to it. */
@@ -101,18 +120,7 @@ export const logger: Logger = pino(
         /* Errors passed as { err } are expanded into type, message and stack. */
         serializers: { err: serializeError },
         /* Never let credentials reach a log line, whatever gets logged. */
-        redact: {
-            paths: [
-                "req.headers.authorization",
-                "req.headers.cookie",
-                "*.token",
-                "*.accessToken",
-                "*.refreshToken",
-                "*.secret",
-                "*.password",
-            ],
-            censor: "[redacted]",
-        },
+        redact: REDACT,
     },
     createDestination(),
 );
